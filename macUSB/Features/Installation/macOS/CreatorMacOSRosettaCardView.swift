@@ -73,7 +73,7 @@ struct CreatorMacOSRosettaCardView: View {
                     Image(systemName: iconName)
                         .font(.title3)
                         .foregroundColor(tint)
-                        .contentTransition(.symbolEffect(.replace))
+                        .macUSBSymbolReplaceTransition()
                         .frame(width: MacUSBDesignTokens.iconColumnWidth)
 
                     VStack(alignment: .leading, spacing: 3) {
@@ -103,5 +103,18 @@ struct CreatorMacOSRosettaCardView: View {
             }
         }
         .animation(.easeInOut(duration: 0.24), value: state)
+    }
+}
+
+
+// macOS 13 (Ventura) compatibility: symbol effects are only available on macOS 14+.
+private extension View {
+    @ViewBuilder
+    func macUSBSymbolReplaceTransition() -> some View {
+        if #available(macOS 14.0, *) {
+            self.contentTransition(.symbolEffect(.replace))
+        } else {
+            self.contentTransition(.opacity)
+        }
     }
 }
