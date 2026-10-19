@@ -7,6 +7,9 @@ on:
   push:
     branches: [ventura-intel, main]
 
+permissions:
+  contents: write
+
 jobs:
   build:
     # The project format (objectVersion 77), the .icon app icon and the
@@ -71,6 +74,18 @@ jobs:
           path: |
             macUSB-ventura-intel.zip
             install-macusb.sh
+
+      - name: Publish GitHub Release (public download link)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="ventura-intel-build-${{ github.run_number }}"
+          gh release create "$TAG" macUSB-ventura-intel.zip install-macusb.sh ventura/HUONG-DAN.md \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "macUSB cho Intel + macOS Ventura (build ${{ github.run_number }})" \
+            --notes "Bản build x86_64, macOS 13.0+, ký ad-hoc. Tải macUSB-ventura-intel.zip và install-macusb.sh, rồi chạy: chmod +x install-macusb.sh && ./install-macusb.sh macUSB-ventura-intel.zip — xem HUONG-DAN.md." \
+            --latest
 
       - uses: actions/upload-artifact@v4
         if: always()
