@@ -94,30 +94,30 @@ struct MacOSDownloaderWindowShellView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             prerequisiteController.refresh(trigger: .appActivation)
         }
-        .onChange(of: logic.familyGroups) {
+        .onChange(of: logic.familyGroups) { _ in
             ensureSelectedEntryIsVisible()
         }
-        .onChange(of: logic.state) {
+        .onChange(of: logic.state) { _ in
             presentUnrecognizedLocalInstallersAlertIfNeeded()
         }
-        .onChange(of: showAllAvailableVersions) {
+        .onChange(of: showAllAvailableVersions) { _ in
             ensureSelectedEntryIsVisible()
         }
-        .onChange(of: showBetaVersions) {
+        .onChange(of: showBetaVersions) { _ in
             selectedInstallerID = nil
             AppLogging.info(
                 "Public Beta visibility changed to \(showBetaVersions). Applied the animated filter to current results without refreshing Apple catalogs.",
                 stage: .downloader
             )
         }
-        .onChange(of: downloadFlowModel.isFinished) {
+        .onChange(of: downloadFlowModel.isFinished) { _ in
             guard downloadFlowModel.isFinished,
                   downloadFlowModel.workflowState == .completed,
                   let activeDownloadEntry
             else { return }
             sendDownloadCompletionNotificationIfInactive(for: activeDownloadEntry)
         }
-        .onChange(of: downloadFlowModel.pendingDiskSpaceAlert) {
+        .onChange(of: downloadFlowModel.pendingDiskSpaceAlert) { _ in
             guard let context = downloadFlowModel.pendingDiskSpaceAlert else { return }
             presentInsufficientDiskSpaceAlert(context: context)
             downloadFlowModel.pendingDiskSpaceAlert = nil
@@ -125,12 +125,12 @@ struct MacOSDownloaderWindowShellView: View {
                 returnToInstallerListAfterDiskImagePreflight()
             }
         }
-        .onChange(of: downloadFlowModel.pendingDiskImageFolderUnavailableAlert) {
+        .onChange(of: downloadFlowModel.pendingDiskImageFolderUnavailableAlert) { _ in
             guard downloadFlowModel.pendingDiskImageFolderUnavailableAlert else { return }
             presentDiskImageFolderUnavailableAlert()
             returnToInstallerListAfterDiskImagePreflight()
         }
-        .onChange(of: downloadFlowModel.didCancelDiskImagePreflight) {
+        .onChange(of: downloadFlowModel.didCancelDiskImagePreflight) { _ in
             guard downloadFlowModel.didCancelDiskImagePreflight else { return }
             returnToInstallerListAfterDiskImagePreflight()
         }

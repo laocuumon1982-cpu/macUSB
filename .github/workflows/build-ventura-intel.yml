@@ -1,0 +1,79 @@
+name: Build macUSB for Intel + macOS Ventura
+
+# Builds an x86_64, ad-hoc signed macUSB.app with a macOS 13.0 deployment target.
+# Run it from the "Actions" tab (Run workflow) or by pushing to the branch.
+on:
+  workflow_dispatch:
+  push:
+    branches: [ventura-intel, main]
+
+jobs:
+  build:
+    # The project format (objectVersion 77), the .icon app icon and the
+    # Liquid Glass code need Xcode 26, which does not run on Ventura itself.
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest stable Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Check Xcode version (needs 26+)
+        run: |
+          xcodebuild -version
+          major=$(xcodebuild -version | awk 'NR==1{split($2,a,"."); print a[1]}')
+          if [ "$major" -lt 26 ]; then echo "::error::Xcode 26 or newer is required"; exit 1; fi
+
+      - name: Build (Release, x86_64, ad-hoc signed)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project macUSB.xcodeproj \
+            -scheme macUSB \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath build \
+            ARCHS=x86_64 ONLY_ACTIVE_ARCH=NO \
+            MACOSX_DEPLOYMENT_TARGET=13.0 \
+            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= \
+            build | tee build.log | grep -E "error:|warning: .*(deprecated|unavailable)|BUILD (SUCCEEDED|FAILED)" || true
+          test -d build/Build/Products/Release/macUSB.app
+
+      - name: Verify bundle (arch, minimum macOS, helper, signature)
+        run: |
+          set -e
+          APP=build/Build/Products/Release/macUSB.app
+          HELPER="$APP/Contents/Library/Helpers/macUSBHelper"
+          ls "$APP/Contents/Library/LaunchDaemons"
+          ls "$APP/Contents/Resources/macUSBoot"
+          for bin in "$APP/Contents/MacOS/macUSB" "$HELPER"; do
+            lipo -info "$bin"
+            minos=$(vtool -show-build "$bin" | awk '/minos/{print $2; exit}')
+            echo "$bin minos=$minos"
+            [ "$minos" = "13.0" ] || { echo "::error::$bin minos is $minos, expected 13.0"; exit 1; }
+          done
+          /usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$APP/Contents/Info.plist"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign -dvv "$APP" 2>&1 | grep -E "Identifier|Signature|TeamIdentifier|Runtime" || true
+
+      - name: Package
+        run: |
+          cd build/Build/Products/Release
+          ditto -c -k --keepParent macUSB.app "$GITHUB_WORKSPACE/macUSB-ventura-intel.zip"
+          cp "$GITHUB_WORKSPACE/ventura/install-macusb.sh" "$GITHUB_WORKSPACE/"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macUSB-ventura-intel
+          path: |
+            macUSB-ventura-intel.zip
+            install-macusb.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-log
+          path: build.log
