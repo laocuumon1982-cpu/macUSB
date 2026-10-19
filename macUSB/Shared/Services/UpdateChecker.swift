@@ -53,7 +53,9 @@ final class UpdateChecker {
             alert.addButton(withTitle: String(localized: "app.update.action.ignore", table: "App"))
             let response = alert.runModal()
             if response == .alertFirstButtonReturn {
-                NSWorkspace.shared.open(downloadURL)
+                // Ventura/Intel port: the official build requires macOS 14.6+, so send users
+                // to the Intel + macOS 13 builds published from this fork instead.
+                NSWorkspace.shared.open(URL(string: "https://github.com/laocuumon1982-cpu/macUSB/releases")!)
             }
         }
     }

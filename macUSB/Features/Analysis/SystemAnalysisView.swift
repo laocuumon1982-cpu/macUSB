@@ -677,7 +677,7 @@ struct SystemAnalysisView: View {
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willResignActiveNotification)) { _ in
                     logic.cancelDriveRefresh()
                 }
-                .onChange(of: navigateToInstall) {
+                .onChange(of: navigateToInstall) { _ in
                     logic.setDriveRefreshVisible(!navigateToInstall)
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .macUSBResetToStart)) { _ in
