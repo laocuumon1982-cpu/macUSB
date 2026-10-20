@@ -9,8 +9,11 @@ macUSB Win - core logic (no GUI).
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
+import plistlib
+import re
 import os
 import random
 import shutil
@@ -22,13 +25,14 @@ import tempfile
 import threading
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import urlparse
 
 APP_NAME = "macUSB Win"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 USER_AGENT_RECOVERY = "InternetRecovery/1.0"
 USB_LABEL = "MACRECOVERY"
 
@@ -213,7 +217,7 @@ _CNK_HEADER = struct.Struct("<4sIBBBxQQQ")
 _CNK_CHUNK = struct.Struct("<I32s")
 
 
-def read_chunklist(path: Path) -> list[tuple[int, bytes]]:
+def read_chunklist(path: Path, require_signature: bool = True) -> list[tuple[int, bytes]]:
     chunks = []
     with open(path, "rb") as f:
         ctx = hashlib.sha256()
@@ -233,6 +237,9 @@ def read_chunklist(path: Path) -> list[tuple[int, bytes]]:
             plain = int(f'0x1{"f" * 404}003031300d060960864801650304020105000420{"0" * 64}', 16) | int.from_bytes(digest, "big")
             if pow(sig, 0x10001, _APPLE_EFI_ROM_PUBKEY_1) != plain:
                 raise RuntimeError("Chữ ký Apple của chunklist không đúng.")
+        elif smethod == 2 and not require_signature:
+            if f.read(32) != digest:
+                raise RuntimeError("Chunklist bị hỏng.")
         else:
             raise RuntimeError("Chunklist không có chữ ký số của Apple.")
         if f.read(1) != b"":
@@ -241,8 +248,9 @@ def read_chunklist(path: Path) -> list[tuple[int, bytes]]:
 
 
 def verify_image(dmg: Path, chunklist: Path, progress: Progress = _noop_progress,
-                 cancel: Optional[threading.Event] = None, label: str = "Kiểm tra") -> None:
-    chunks = read_chunklist(chunklist)
+                 cancel: Optional[threading.Event] = None, label: str = "Kiểm tra",
+                 require_signature: bool = True) -> None:
+    chunks = read_chunklist(chunklist, require_signature)
     total = sum(c[0] for c in chunks)
     done = 0
     with open(dmg, "rb") as f:
@@ -251,17 +259,19 @@ def verify_image(dmg: Path, chunklist: Path, progress: Progress = _noop_progress
                 raise Cancelled()
             data = f.read(size)
             if len(data) != size or hashlib.sha256(data).digest() != sha:
-                raise RuntimeError(f"Ảnh recovery bị lỗi ở khối {i}. Hãy xoá bộ nhớ đệm và tải lại.")
+                raise RuntimeError(f"File bị lỗi ở khối {i}. Hãy xoá và tải lại.")
             done += size
             progress(done, total, f"{label}: {done * 100 // total}%")
         if f.read(1) != b"":
-            raise RuntimeError("Ảnh recovery lớn hơn chunklist.")
+            raise RuntimeError("File lớn hơn chunklist (không khớp).")
 
 
 def download_recovery(target: RecoveryTarget, progress: Progress = _noop_progress,
-                      log: Log = _noop_log, cancel: Optional[threading.Event] = None) -> tuple[Path, Path, str]:
+                      log: Log = _noop_log, cancel: Optional[threading.Event] = None,
+                      stage: Log = _noop_log) -> tuple[Path, Path, str]:
     """Returns (dmg_path, chunklist_path, product_id). Uses a verified cache."""
     cancel = cancel or threading.Event()
+    stage("download")
     log(f"Kết nối máy chủ Apple cho {target.name} (board {target.board_id}, os={target.os_type})…")
     info = recovery_info(target)
     product = info[INFO_PRODUCT]
@@ -273,6 +283,7 @@ def download_recovery(target: RecoveryTarget, progress: Progress = _noop_progres
 
     if dmg.exists() and cnk.exists():
         try:
+            stage("verify")
             log("Đã có bản tải trước đó, đang kiểm tra lại…")
             verify_image(dmg, cnk, progress, cancel, "Kiểm tra bản đã tải")
             log("Bản đã tải còn nguyên vẹn, dùng lại.")
@@ -292,6 +303,7 @@ def download_recovery(target: RecoveryTarget, progress: Progress = _noop_progres
     log("Chunklist có chữ ký hợp lệ của Apple.")
     _download(info[INFO_IMAGE_LINK], dmg, headers(info[INFO_IMAGE_LINK], info[INFO_IMAGE_SESS]),
               progress, cancel, f"Tải {dmg_name}")
+    stage("verify")
     log("Đang kiểm tra toàn vẹn ảnh recovery…")
     verify_image(dmg, cnk, progress, cancel, "Kiểm tra")
     log("Ảnh recovery khớp chunklist của Apple.")
@@ -434,17 +446,21 @@ OpenCore © Acidanthera (BSD-3-Clause).
 
 def write_recovery_usb(disk: Disk, dmg: Path, chunklist: Path, product: str, target_name: str,
                        progress: Progress = _noop_progress, log: Log = _noop_log,
-                       cancel: Optional[threading.Event] = None, allow_non_usb: bool = False) -> str:
+                       cancel: Optional[threading.Event] = None, allow_non_usb: bool = False,
+                       stage: Log = _noop_log) -> str:
     cancel = cancel or threading.Event()
     efi_src = resource_dir() / "efi" / "EFI"
     if not (efi_src / "BOOT" / "BOOTx64.efi").exists():
         raise RuntimeError("Thiếu bộ khởi động OpenCore trong app (efi/EFI).")
+    stage("format")
     root = Path(format_usb(disk, log, allow_non_usb))
     log(f"Đã định dạng: {root}")
+    stage("efi")
     log("Chép bộ khởi động OpenCore (EFI)…")
     shutil.copytree(efi_src, root / "EFI", dirs_exist_ok=True)
     for sub in ("ACPI", "Kexts", "Tools", "Resources", "Drivers"):
         (root / "EFI" / "OC" / sub).mkdir(parents=True, exist_ok=True)
+    stage("copy")
     rec = root / "com.apple.recovery.boot"
     rec.mkdir(exist_ok=True)
     shutil.copy2(chunklist, rec / chunklist.name)
@@ -452,6 +468,7 @@ def write_recovery_usb(disk: Disk, dmg: Path, chunklist: Path, product: str, tar
     _copy_file(dmg, rec / dmg.name, progress, cancel, f"Ghi {dmg.name}")
     (rec / ".contentDetails").write_text(target_name.split(" (")[0], encoding="utf-8")
     (root / "HUONG-DAN.txt").write_text(USB_README.format(name=target_name, product=product), encoding="utf-8")
+    stage("check")
     log("Kiểm tra lại dữ liệu trên USB…")
     verify_image(rec / dmg.name, rec / chunklist.name, progress, cancel, "Kiểm tra USB")
     log("USB Recovery đã sẵn sàng.")
@@ -459,8 +476,226 @@ def write_recovery_usb(disk: Disk, dmg: Path, chunklist: Path, product: str, tar
 
 
 # --------------------------------------------------------------------------
+# Local source (BaseSystem/RecoveryImage .dmg + .chunklist)
+# --------------------------------------------------------------------------
+
+def find_local_recovery(path: str | Path) -> tuple[Path, Path]:
+    """Accepts a .dmg, a .chunklist, or a folder (e.g. com.apple.recovery.boot)."""
+    p = Path(path)
+    if p.is_dir():
+        for name in ("BaseSystem", "RecoveryImage"):
+            if (p / f"{name}.dmg").exists():
+                p = p / f"{name}.dmg"
+                break
+        else:
+            dmgs = sorted(p.glob("*.dmg"))
+            if not dmgs:
+                raise RuntimeError("Thư mục không có file BaseSystem.dmg / RecoveryImage.dmg.")
+            p = dmgs[0]
+    if p.suffix.lower() == ".pkg":
+        raise RuntimeError(
+            "File .pkg (bộ cài đầy đủ) không tạo USB được trên Windows. Hãy dùng file .pkg trên máy Mac, "
+            "hoặc chọn ảnh Recovery (BaseSystem.dmg + BaseSystem.chunklist).")
+    if p.suffix.lower() == ".chunklist":
+        p = p.with_suffix(".dmg")
+    if p.suffix.lower() != ".dmg" or not p.exists():
+        raise RuntimeError("Hãy chọn file BaseSystem.dmg hoặc RecoveryImage.dmg.")
+    cnk = p.with_suffix(".chunklist")
+    if not cnk.exists():
+        raise RuntimeError(f"Thiếu file {cnk.name} cùng thư mục. Ảnh Recovery cần chunklist có chữ ký "
+                           "của Apple để Mac khởi động được.")
+    return p, cnk
+
+
+def use_local_recovery(path: str | Path, progress: Progress = _noop_progress, log: Log = _noop_log,
+                       cancel: Optional[threading.Event] = None, stage: Log = _noop_log) -> tuple[Path, Path, str]:
+    dmg, cnk = find_local_recovery(path)
+    stage("verify")
+    log(f"Kiểm tra file nguồn {dmg.name} với chữ ký Apple…")
+    verify_image(dmg, cnk, progress, cancel, "Kiểm tra nguồn")
+    log("File nguồn hợp lệ (đúng ảnh Recovery của Apple).")
+    return dmg, cnk, f"local:{dmg.name}"
+
+
+def eject_drive(root: str) -> None:
+    """Safely eject a removable drive like 'Z:\\'."""
+    letter = root[0].upper()
+    ps = (f"$d=(New-Object -ComObject Shell.Application).Namespace(17).ParseName('{letter}:');"
+          f"if($d){{$d.InvokeVerb('Eject')}};Start-Sleep -Seconds 2;"
+          f"if(Test-Path '{letter}:\\'){{exit 3}}")
+    r = _run(["powershell", "-NoProfile", "-NonInteractive", "-STA", "-Command", ps], 60)
+    if r.returncode != 0:
+        raise RuntimeError("Windows chưa tháo được USB (có thể đang có cửa sổ mở ổ này). "
+                           "Hãy đóng Explorer rồi thử lại, hoặc dùng biểu tượng 'Safely Remove Hardware'.")
+
+
+# --------------------------------------------------------------------------
+# Built-in downloader: full macOS installers from Apple's software catalog
+# --------------------------------------------------------------------------
+
+_CAT_TAIL = "15-14-13-12-10.16-10.15-10.14-10.13-10.12-10.11-10.10-10.9-mountainlion-lion-snowleopard-leopard.merged-1.sucatalog.gz"
+_CAT = "https://swscan.apple.com/content/catalogs/others/index-"
+CATALOGS = [
+    ("stable", f"{_CAT}27-26-{_CAT_TAIL}"),
+    ("beta", f"{_CAT}27beta-27-26-{_CAT_TAIL}"),
+    ("beta", f"{_CAT}26beta-26-{_CAT_TAIL}"),
+    ("beta", f"{_CAT}15beta-{_CAT_TAIL}"),
+]
+MACOS_NAMES = {11: "Big Sur", 12: "Monterey", 13: "Ventura", 14: "Sonoma", 15: "Sequoia",
+               26: "Tahoe", 27: "Golden Gate"}
+LAST_INTEL_MAJOR = 26
+
+
+@dataclass
+class Installer:
+    product_id: str
+    title: str
+    version: str
+    build: str
+    post_date: str
+    size: int
+    pkg_url: str
+    integrity_url: str
+    channel: str  # stable | beta
+
+    @property
+    def major(self) -> int:
+        try:
+            return int(self.version.split(".")[0])
+        except ValueError:
+            return 0
+
+    @property
+    def intel_ok(self) -> bool:
+        return 0 < self.major <= LAST_INTEL_MAJOR
+
+    def label(self) -> str:
+        beta = " (Public Beta)" if self.channel == "beta" else ""
+        return f"{self.title} {self.version} ({self.build}){beta}"
+
+    def recovery_target(self) -> Optional[RecoveryTarget]:
+        if self.channel == "beta" or not self.intel_ok:
+            return None
+        name = MACOS_NAMES.get(self.major, "")
+        return next((t for t in RECOVERY_TARGETS if name and name in t.name), None)
+
+
+def _fetch(url: str, timeout: float = 60) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "Software%20Update (unknown version)",
+                                               "Accept-Encoding": "identity"})
+    with _open(req, timeout) as resp:
+        data = resp.read()
+    if data[:2] == b"\x1f\x8b":
+        data = gzip.decompress(data)
+    return data
+
+
+def _dist_meta(dist_url: str) -> tuple[str, str, str]:
+    text = _fetch(dist_url, 30).decode("utf-8", "replace")
+    def key(k: str) -> str:
+        m = re.search(rf"<key>{k}</key>\s*<string>([^<]*)</string>", text)
+        return m.group(1).strip() if m else ""
+    title = ""
+    m = re.search(r'"SU_TITLE"\s*=\s*"([^"]+)"', text) or re.search(r"<title>([^<]+)</title>", text)
+    if m:
+        title = m.group(1).strip()
+    if not title or title.upper() == "SU_TITLE":
+        title = "macOS"
+    return title, key("VERSION"), key("BUILD")
+
+
+def list_installers(include_beta: bool = True, log: Log = _noop_log) -> list[Installer]:
+    candidates: dict[str, tuple[str, dict]] = {}
+    for channel, url in CATALOGS:
+        if channel == "beta" and not include_beta:
+            continue
+        try:
+            cat = plistlib.loads(_fetch(url))
+        except Exception as e:  # noqa: BLE001
+            log(f"Không đọc được danh mục {channel}: {e}")
+            continue
+        for pid, prod in cat.get("Products", {}).items():
+            emi = prod.get("ExtendedMetaInfo", {})
+            if "InstallAssistantPackageIdentifiers" not in emi:
+                continue
+            pkgs = [p for p in prod.get("Packages", []) if str(p.get("URL", "")).endswith("InstallAssistant.pkg")]
+            if not pkgs:
+                continue
+            if pid in candidates and candidates[pid][0] == "stable":
+                continue
+            candidates[pid] = (channel, prod)
+
+    def build(item):
+        pid, (channel, prod) = item
+        dists = prod.get("Distributions", {})
+        dist = dists.get("English") or dists.get("en") or next(iter(dists.values()), None)
+        if not dist:
+            return None
+        try:
+            title, version, build_id = _dist_meta(dist)
+        except Exception:  # noqa: BLE001
+            return None
+        pkg = next(p for p in prod["Packages"] if str(p.get("URL", "")).endswith("InstallAssistant.pkg"))
+        post = prod.get("PostDate")
+        return Installer(pid, title, version, build_id, post.strftime("%Y-%m-%d") if post else "",
+                         int(pkg.get("Size") or 0), pkg["URL"], pkg.get("IntegrityDataURL", ""), channel)
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        found = [i for i in ex.map(build, candidates.items()) if i and i.version]
+
+    def vkey(i: Installer):
+        return tuple(int(x) if x.isdigit() else 0 for x in i.version.split("."))
+    found.sort(key=lambda i: (vkey(i), i.post_date), reverse=True)
+    return found
+
+
+def download_installer(inst: Installer, folder: Path, progress: Progress = _noop_progress,
+                       log: Log = _noop_log, cancel: Optional[threading.Event] = None,
+                       stage: Log = _noop_log) -> Path:
+    cancel = cancel or threading.Event()
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", f"InstallAssistant_{inst.version}_{inst.build}")
+    dest = folder / f"{safe}.pkg"
+    part = dest.with_name(dest.name + ".part")
+    have = part.stat().st_size if part.exists() else 0
+    free = shutil.disk_usage(folder).free
+    if inst.size and free < inst.size - have + 256 * 1024 ** 2:
+        raise RuntimeError(f"Không đủ dung lượng: cần {human_size(inst.size - have)}, còn {human_size(free)}.")
+    cnk = None
+    if inst.integrity_url:
+        cnk = folder / f"{safe}.chunklist"
+        _download(inst.integrity_url, cnk, {"User-Agent": "macUSBWin"}, _noop_progress, cancel, "chunklist")
+    stage("download")
+    if not (dest.exists() and inst.size and dest.stat().st_size == inst.size):
+        log(f"Tải {inst.label()} — {human_size(inst.size)} từ máy chủ Apple…")
+        _download(inst.pkg_url, dest, {"User-Agent": "macUSBWin"}, progress, cancel,
+                  "Tải bộ cài", resume=True, expected_size=inst.size)
+    stage("verify")
+    if cnk:
+        log("Kiểm tra toàn vẹn với chunklist của Apple…")
+        verify_image(dest, cnk, progress, cancel, "Kiểm tra bộ cài", require_signature=False)
+        log("Bộ cài khớp chunklist của Apple.")
+    elif inst.size and dest.stat().st_size != inst.size:
+        raise RuntimeError("Kích thước file không khớp danh mục Apple.")
+    return dest
+
+
+# --------------------------------------------------------------------------
 # Self test (used by CI)
 # --------------------------------------------------------------------------
+
+def _accepts_pkg() -> bool:
+    tmp = Path(tempfile.gettempdir()) / "x.pkg"
+    tmp.write_bytes(b"x")
+    try:
+        find_local_recovery(tmp)
+        return True
+    except RuntimeError:
+        return False
+    finally:
+        tmp.unlink()
+
 
 def selftest(full: bool = False, vhd_disk: Optional[int] = None) -> int:
     ok = True
@@ -480,14 +715,21 @@ def selftest(full: bool = False, vhd_disk: Optional[int] = None) -> int:
     session = check("Apple recovery session", recovery_session)
     seen = {}
     for t in RECOVERY_TARGETS:
-        info = check(f"Recovery info {t.name}", lambda t=t: recovery_info(t, session))
+        info = check(f"Recovery info {t.name}", lambda t=t: recovery_info(t, session)["AP"])
+        info = {"AP": info, "AU": "x/BaseSystem.dmg"} if info else None
         if info:
             seen[t.name] = info["AP"]
-            print(f"       {info['AP']}  {os.path.basename(urlparse(info['AU']).path)}")
+    insts = check("Apple catalog installers", lambda: [i.label() for i in list_installers(True)][:12])
+    if insts:
+        print(f"       {len(insts)} shown")
     target = next(t for t in RECOVERY_TARGETS if t.name.startswith("macOS Ventura"))
     if full:
         res = check("Download+verify Ventura recovery",
                     lambda: download_recovery(target, log=print))
+        if res:
+            check("Local source (same files)", lambda: use_local_recovery(res[0].parent)[2])
+            check("Local .pkg rejected", lambda: (_ for _ in ()).throw(RuntimeError("not rejected"))
+                  if _accepts_pkg() else "rejected")
         if res and vhd_disk is not None:
             disk = next(d for d in list_disks(include_non_usb=True) if d.number == vhd_disk)
             root = check("Write recovery USB to test disk",

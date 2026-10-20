@@ -46,6 +46,14 @@ jobs:
           Write-Host "::notice title=selftest-source::$t"
           if ($rc -ne 0) { throw "selftest failed" }
 
+      - name: UI smoke test from source
+        run: |
+          python macusb_win/app.py --uitest --out ui-src.txt
+          $rc = $LASTEXITCODE
+          $t = (Get-Content ui-src.txt -Raw -Encoding utf8) -replace "`r", "" -replace "%", "%25" -replace "`n", "%0A"
+          Write-Host "::notice title=uitest-source::$t"
+          if ($rc -ne 0) { throw "ui test failed" }
+
       - name: Build exe
         run: |
           pip install pyinstaller==6.11.1
@@ -55,6 +63,10 @@ jobs:
 
       - name: End-to-end test with exe on a virtual disk
         run: |
+          $u = Start-Process -FilePath dist/macUSB-Win.exe -ArgumentList "--uitest","--out","ui-exe.txt" -Wait -PassThru
+          $t = (Get-Content ui-exe.txt -Raw -Encoding utf8) -replace "`r", "" -replace "%", "%25" -replace "`n", "%0A"
+          Write-Host "::notice title=uitest-exe::$t"
+          if ($u.ExitCode -ne 0) { throw "exe ui test failed" }
           $vhd = "$env:RUNNER_TEMP\test.vhdx"
           "create vdisk file=`"$vhd`" maximum=8192 type=expandable`nattach vdisk`nexit" | Set-Content dp.txt -Encoding ascii
           diskpart /s dp.txt
@@ -76,11 +88,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "macusb-win-v1.0.${{ github.run_number }}"
+          $tag = "macusb-win-v1.1.${{ github.run_number }}"
           Copy-Item README-WIN.md dist/HUONG-DAN.md
           gh release create $tag dist/macUSB-Win.exe dist/HUONG-DAN.md `
             --repo "${{ github.repository }}" --target "${{ github.sha }}" `
-            --title "macUSB Win 1.0.${{ github.run_number }} — USB Recovery cho Mac Intel" `
+            --title "macUSB Win 1.1.${{ github.run_number }} — USB Recovery cho Mac Intel" `
             --notes-file README-WIN.md --latest=false
 
       - uses: actions/upload-artifact@v4

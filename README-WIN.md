@@ -1,12 +1,17 @@
 # macUSB Win — tạo USB Recovery cho Mac Intel trên Windows
 
-Tải **macUSB-Win.exe** bên dưới, chạy (Windows sẽ hỏi quyền Administrator), rồi:
+Tải **macUSB-Win.exe** bên dưới, chạy (Windows sẽ hỏi quyền Administrator). App làm theo từng bước:
 
-1. Chọn phiên bản macOS (danh sách có ghi đời máy hỗ trợ).
-2. Cắm USB (khuyên dùng 8 GB trở lên) → bấm **Làm mới** → chọn ổ USB.
-3. Bấm **Tạo USB Recovery**. USB sẽ bị **xoá sạch**.
+1. **Chọn nguồn**
+   - *Recovery từ Apple*: chọn phiên bản macOS (có ghi đời máy hỗ trợ) hoặc tự nhập board-id.
+   - *Trình tải bộ cài macOS*: danh sách bộ cài đầy đủ từ Apple, kể cả **Public Beta**. Tải được file `InstallAssistant.pkg` (có kiểm tra toàn vẹn, tải tiếp khi bị ngắt), hoặc tạo USB Recovery cùng phiên bản.
+   - *Nguồn trên máy*: file `BaseSystem.dmg` / `RecoveryImage.dmg` (kèm `.chunklist`) hoặc thư mục `com.apple.recovery.boot`.
+2. **Chọn ổ USB** (chỉ hiện USB/thẻ nhớ).
+3. **Xem lại thông tin** trước khi xoá USB.
+4. **Theo dõi từng giai đoạn**: tải → kiểm tra chữ ký Apple → định dạng → chép OpenCore → chép Recovery → kiểm tra USB.
+5. **Kết quả**: nút **Tháo USB an toàn** ngay trên màn hình cuối.
 
-App tải ảnh Recovery trực tiếp từ máy chủ Apple, kiểm tra chữ ký số của Apple, định dạng USB FAT32 và chép bộ khởi động OpenCore tối giản (không kext, không sửa NVRAM/SMBIOS).
+Giới hạn của Windows: file `.pkg` bộ cài đầy đủ không biến thành USB cài offline được (cần `createinstallmedia` trên Mac). USB tạo ra là USB Recovery — cài macOS qua Internet.
 
 ## Khởi động trên Mac
 1. Cắm USB, bật máy và giữ phím **Option (⌥)**.
