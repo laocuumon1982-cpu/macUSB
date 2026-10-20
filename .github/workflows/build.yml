@@ -1,0 +1,84 @@
+name: Build macUSB Win
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [macusb-win]
+
+permissions:
+  contents: write
+
+env:
+  OPENCORE_VERSION: "1.0.8"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download OpenCore and build EFI
+        run: |
+          $v = $env:OPENCORE_VERSION
+          Invoke-WebRequest "https://github.com/acidanthera/OpenCorePkg/releases/download/$v/OpenCore-$v-RELEASE.zip" -OutFile oc.zip
+          Expand-Archive oc.zip -DestinationPath oc
+          python tools/make_efi.py oc macusb_win/efi
+          & oc/Utilities/ocvalidate/ocvalidate.exe macusb_win/efi/EFI/OC/config.plist
+          if ($LASTEXITCODE -ne 0) { throw "ocvalidate failed" }
+          Copy-Item oc/LICENSE.txt macusb_win/efi/EFI/OpenCore-LICENSE.txt -ErrorAction SilentlyContinue
+          Get-ChildItem -Recurse macusb_win/efi | Select-Object FullName, Length
+
+      - name: Self test from source (Apple servers)
+        run: python macusb_win/app.py --selftest
+
+      - name: Build exe
+        run: |
+          pip install pyinstaller==6.11.1
+          pyinstaller --noconfirm --onefile --windowed --uac-admin --name macUSB-Win `
+            --add-data "macusb_win/efi;efi" macusb_win/app.py
+          Get-Item dist/macUSB-Win.exe | Select-Object Name, Length
+
+      - name: End-to-end test with exe on a virtual disk
+        run: |
+          $vhd = "$env:RUNNER_TEMP\test.vhdx"
+          "create vdisk file=`"$vhd`" maximum=8192 type=expandable`nattach vdisk`nexit" | Set-Content dp.txt -Encoding ascii
+          diskpart /s dp.txt
+          Start-Sleep 3
+          $disk = Get-Disk | Where-Object { $_.Location -like "*test.vhdx*" -or $_.BusType -eq 'File Backed Virtual' } | Select-Object -First 1
+          $disk | Format-List Number, FriendlyName, Size, BusType
+          $p = Start-Process -FilePath dist/macUSB-Win.exe -ArgumentList "--selftest","--full","--disk",$disk.Number,"--out","selftest.txt" -Wait -PassThru
+          Get-Content selftest.txt
+          if ($p.ExitCode -ne 0) { throw "selftest failed ($($p.ExitCode))" }
+          $vol = Get-Partition -DiskNumber $disk.Number | Get-Volume
+          $vol | Format-List DriveLetter, FileSystem, FileSystemLabel, Size
+          $root = "$($vol.DriveLetter):\"
+          Get-ChildItem -Recurse $root | Select-Object FullName, Length
+          & oc/Utilities/ocvalidate/ocvalidate.exe "$root\EFI\OC\config.plist"
+          if ($LASTEXITCODE -ne 0) { throw "ocvalidate on USB failed" }
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "macusb-win-v1.0.${{ github.run_number }}"
+          Copy-Item README-WIN.md dist/HUONG-DAN.md
+          gh release create $tag dist/macUSB-Win.exe dist/HUONG-DAN.md `
+            --repo "${{ github.repository }}" --target "${{ github.sha }}" `
+            --title "macUSB Win 1.0.${{ github.run_number }} — USB Recovery cho Mac Intel" `
+            --notes-file README-WIN.md --latest=false
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macusb-win
+          path: |
+            dist/macUSB-Win.exe
+            selftest.txt

@@ -1,0 +1,5 @@
+__pycache__/
+macusb_win/efi/
+build/
+dist/
+*.spec
