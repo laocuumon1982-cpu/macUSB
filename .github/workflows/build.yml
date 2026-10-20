@@ -10,6 +10,8 @@ permissions:
 
 env:
   OPENCORE_VERSION: "1.0.8"
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
 
 jobs:
   build:
@@ -37,7 +39,12 @@ jobs:
           Get-ChildItem -Recurse macusb_win/efi | Select-Object FullName, Length
 
       - name: Self test from source (Apple servers)
-        run: python macusb_win/app.py --selftest
+        run: |
+          python macusb_win/app.py --selftest --out st-src.txt
+          $rc = $LASTEXITCODE
+          $t = (Get-Content st-src.txt -Raw -Encoding utf8) -replace "`r", "" -replace "%", "%25" -replace "`n", "%0A"
+          Write-Host "::notice title=selftest-source::$t"
+          if ($rc -ne 0) { throw "selftest failed" }
 
       - name: Build exe
         run: |
@@ -55,7 +62,8 @@ jobs:
           $disk = Get-Disk | Where-Object { $_.Location -like "*test.vhdx*" -or $_.BusType -eq 'File Backed Virtual' } | Select-Object -First 1
           $disk | Format-List Number, FriendlyName, Size, BusType
           $p = Start-Process -FilePath dist/macUSB-Win.exe -ArgumentList "--selftest","--full","--disk",$disk.Number,"--out","selftest.txt" -Wait -PassThru
-          Get-Content selftest.txt
+          $t = (Get-Content selftest.txt -Raw -Encoding utf8) -replace "`r", "" -replace "%", "%25" -replace "`n", "%0A"
+          Write-Host "::notice title=selftest-e2e::$t"
           if ($p.ExitCode -ne 0) { throw "selftest failed ($($p.ExitCode))" }
           $vol = Get-Partition -DiskNumber $disk.Number | Get-Volume
           $vol | Format-List DriveLetter, FileSystem, FileSystemLabel, Size
@@ -82,3 +90,4 @@ jobs:
           path: |
             dist/macUSB-Win.exe
             selftest.txt
+            st-src.txt
