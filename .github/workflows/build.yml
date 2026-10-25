@@ -77,7 +77,8 @@ jobs:
           $t = (Get-Content selftest.txt -Raw -Encoding utf8) -replace "`r", "" -replace "%", "%25" -replace "`n", "%0A"
           Write-Host "::notice title=selftest-e2e::$t"
           if ($p.ExitCode -ne 0) { throw "selftest failed ($($p.ExitCode))" }
-          $vol = Get-Partition -DiskNumber $disk.Number | Get-Volume
+          $vol = Get-Partition -DiskNumber $disk.Number | Get-Volume | Where-Object { $_.FileSystemLabel -eq 'MACRECOVERY' } | Select-Object -First 1
+          Get-Partition -DiskNumber $disk.Number | Get-Volume | Format-Table DriveLetter, FileSystem, FileSystemLabel, Size
           $vol | Format-List DriveLetter, FileSystem, FileSystemLabel, Size
           $root = "$($vol.DriveLetter):\"
           Get-ChildItem -Recurse $root | Select-Object FullName, Length
