@@ -32,7 +32,7 @@ from typing import Callable, Optional
 from urllib.parse import urlparse
 
 APP_NAME = "macUSB Win"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 USER_AGENT_RECOVERY = "InternetRecovery/1.0"
 USB_LABEL = "MACRECOVERY"
 
@@ -682,6 +682,221 @@ def download_installer(inst: Installer, folder: Path, progress: Progress = _noop
 
 
 # --------------------------------------------------------------------------
+# Offline installer USB (experimental): FAT32 boot partition + exFAT partition
+# with the full InstallAssistant.pkg and a script run from Recovery's Terminal.
+# --------------------------------------------------------------------------
+
+INSTALL_LABEL = "MACINSTALL"
+BOOT_PART_MB = 2048
+
+OFFLINE_SCRIPT = r"""#!/bin/sh
+# macUSB Win - cai macOS OFFLINE tu USB. Chay trong Terminal cua macOS Recovery:
+#   sh /Volumes/MACINSTALL/cai-macos.sh
+USB="/Volumes/MACINSTALL"
+PKG="$USB/InstallAssistant.pkg"
+echo "=== macUSB Win - cai macOS offline: {name} ==="
+if [ ! -f "$PKG" ]; then
+  echo "Khong thay $PKG. Kiem tra USB da cam chua (o MACINSTALL)."; exit 1
+fi
+echo ""
+echo "Cac o dang co trong /Volumes:"
+ls -1 /Volumes | grep -v -e MACINSTALL -e MACRECOVERY -e "Base System" | sed 's/^/   - /'
+echo ""
+echo "Neu o can cai CHUA co trong danh sach: mo Disk Utility, chon o trong may,"
+echo "bam Erase (Format: APFS, ten: Macintosh HD), roi chay lai lenh nay."
+echo ""
+printf "Nhap TEN o se cai macOS [Macintosh HD]: "
+read TARGET
+[ -z "$TARGET" ] && TARGET="Macintosh HD"
+[ -d "/Volumes/$TARGET" ] || diskutil mount "$TARGET" >/dev/null 2>&1
+if [ ! -d "/Volumes/$TARGET" ]; then
+  echo "Khong thay o /Volumes/$TARGET. Mo Disk Utility de Mount hoac Erase roi chay lai."; exit 1
+fi
+STAGE="/Volumes/$TARGET"
+[ -d "/Volumes/$TARGET - Data" ] || diskutil mount "$TARGET - Data" >/dev/null 2>&1
+[ -d "/Volumes/$TARGET - Data" ] && STAGE="/Volumes/$TARGET - Data"
+FREE_KB=$(df -k "$STAGE" | awk 'NR==2 {{print $4}}')
+if [ -n "$FREE_KB" ] && [ "$FREE_KB" -lt 41943040 ]; then
+  echo "Canh bao: o $TARGET con it hon 40 GB trong. Cai dat co the that bai."
+fi
+echo ""
+echo "Buoc 1/2: giai nen bo cai vao $STAGE (5-20 phut, khong rut USB)..."
+installer -pkg "$PKG" -target "$STAGE" || {{ echo "LOI: khong giai nen duoc bo cai."; exit 1; }}
+APP=$(ls -d "$STAGE"/Applications/Install\ macOS*.app 2>/dev/null | head -1)
+if [ -z "$APP" ]; then echo "LOI: khong tim thay app Install macOS sau khi giai nen."; exit 1; fi
+echo ""
+echo "Buoc 2/2: cai macOS len '$TARGET' bang $APP"
+echo "May se tu khoi dong lai vai lan. Khong tat may."
+"$APP/Contents/Resources/startosinstall" --agreetolicense --volume "/Volumes/$TARGET" --nointeraction
+echo "Neu startosinstall bao loi, chay: open \"$APP\"  de mo trinh cai dat dang cua so."
+"""
+
+OFFLINE_README = """macUSB Win — USB CÀI ĐẶT OFFLINE cho Mac Intel ({name}) — THỬ NGHIỆM
+
+USB có 2 phân vùng:
+  MACRECOVERY (FAT32): bộ khởi động OpenCore + macOS Recovery ({product})
+  MACINSTALL  (exFAT): bộ cài đầy đủ InstallAssistant.pkg + script cai-macos.sh
+
+CÁCH CÀI LẠI macOS (KHÔNG CẦN INTERNET)
+1. Cắm USB, bật Mac và giữ phím Option (⌥).
+2. Chọn "EFI Boot" → trong menu OpenCore chọn mục macOS Recovery / "macOS Base System".
+3. (Nếu cần xoá sạch máy) Disk Utility → View → Show All Devices → chọn ổ trong →
+   Erase: Format APFS, Scheme GUID, tên "Macintosh HD". Thoát Disk Utility.
+4. Menu Utilities → Terminal, gõ:
+       sh /Volumes/MACINSTALL/cai-macos.sh
+   rồi Enter, nhập tên ổ (Enter = "Macintosh HD"). Script giải nén bộ cài rồi cài macOS.
+5. Máy tự khởi động lại vài lần. Có thể rút USB khi thấy màn hình cài đặt chạy từ ổ trong.
+
+NẾU KHÔNG CHẠY ĐƯỢC
+- Recovery không thấy ổ MACINSTALL: trong Terminal gõ  diskutil list  rồi
+  diskutil mount MACINSTALL ; hoặc dùng "Reinstall macOS" (cài qua Internet) — vẫn chạy được
+  vì USB có sẵn macOS Recovery.
+- Mac có chip T2 (2018–2020): Startup Security Utility → No Security + Allow external media.
+- Bộ cài phải đúng phiên bản máy hỗ trợ (ví dụ MacBook Pro 2017 tối đa macOS Ventura 13).
+
+Nguồn: Recovery và bộ cài tải trực tiếp từ máy chủ Apple, đã kiểm tra chunklist.
+OpenCore © Acidanthera (BSD-3-Clause).
+"""
+
+
+def _free_letters(n: int) -> list[str]:
+    out = [l for l in "ZYXWVUTSRQPONMLKJIHGFE" if not os.path.exists(f"{l}:\\")][:n]
+    if len(out) < n:
+        raise RuntimeError("Không còn đủ ký tự ổ đĩa trống.")
+    return out
+
+
+def diskpart_script_offline(disk: Disk, boot_letter: str, data_letter: str) -> str:
+    lines = [f"select disk {disk.number}", "attributes disk clear readonly noerr", "online disk noerr",
+             "clean", "convert mbr",
+             f"create partition primary size={BOOT_PART_MB}", f"format fs=fat32 quick label={USB_LABEL}",
+             "active", f"assign letter={boot_letter}",
+             "create partition primary", f"format fs=exfat quick label={INSTALL_LABEL} unit=128K",
+             f"assign letter={data_letter}", "exit"]
+    return "\n".join(lines) + "\n"
+
+
+def offline_min_size(pkg_size: int) -> int:
+    return BOOT_PART_MB * 1024 ** 2 + pkg_size + 512 * 1024 ** 2
+
+
+def _check_disk(disk: Disk, allow_non_usb: bool) -> None:
+    current = {d.number: d for d in list_disks(include_non_usb=allow_non_usb)}
+    if disk.number not in current:
+        raise RuntimeError("Ổ USB đã thay đổi hoặc không còn cắm. Hãy bấm Làm mới.")
+    if current[disk.number].size != disk.size:
+        raise RuntimeError("Dung lượng ổ USB không khớp với ổ đã chọn. Hãy bấm Làm mới.")
+
+
+def format_usb_offline(disk: Disk, log: Log = _noop_log, allow_non_usb: bool = False) -> tuple[str, str]:
+    _check_disk(disk, allow_non_usb)
+    b, d = _free_letters(2)
+    script = diskpart_script_offline(disk, b, d)
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="ascii") as fh:
+        fh.write(script)
+        path = fh.name
+    try:
+        log(f"Xoá ổ {disk.number}, tạo 2 phân vùng: {USB_LABEL} (FAT32, {BOOT_PART_MB} MB) + {INSTALL_LABEL} (exFAT)…")
+        r = _run(["diskpart", "/s", path], 900)
+    finally:
+        os.unlink(path)
+    if r.returncode != 0:
+        raise RuntimeError("diskpart báo lỗi:\n" + (r.stdout + r.stderr).strip()[-1500:])
+    roots = (f"{b}:\\", f"{d}:\\")
+    for _ in range(60):
+        if all(os.path.exists(x) for x in roots):
+            return roots
+        time.sleep(0.5)
+    raise RuntimeError("Đã định dạng nhưng Windows không gắn đủ 2 phân vùng. Hãy rút ra cắm lại USB rồi thử lại.")
+
+
+def _install_boot_files(root: Path, dmg: Path, chunklist: Path, target_name: str, progress: Progress,
+                        cancel: threading.Event, log: Log, stage: Log) -> Path:
+    efi_src = resource_dir() / "efi" / "EFI"
+    if not (efi_src / "BOOT" / "BOOTx64.efi").exists():
+        raise RuntimeError("Thiếu bộ khởi động OpenCore trong app (efi/EFI).")
+    stage("efi")
+    log("Chép bộ khởi động OpenCore (EFI)…")
+    shutil.copytree(efi_src, root / "EFI", dirs_exist_ok=True)
+    for sub in ("ACPI", "Kexts", "Tools", "Resources", "Drivers"):
+        (root / "EFI" / "OC" / sub).mkdir(parents=True, exist_ok=True)
+    stage("copy")
+    rec = root / "com.apple.recovery.boot"
+    rec.mkdir(exist_ok=True)
+    shutil.copy2(chunklist, rec / chunklist.name)
+    log(f"Chép {dmg.name} ({human_size(dmg.stat().st_size)}) vào USB…")
+    _copy_file(dmg, rec / dmg.name, progress, cancel, f"Ghi {dmg.name}")
+    (rec / ".contentDetails").write_text(target_name.split(" (")[0], encoding="utf-8")
+    return rec
+
+
+def prepare_offline_sources(inst: "Installer", progress: Progress = _noop_progress, log: Log = _noop_log,
+                            cancel: Optional[threading.Event] = None, stage: Log = _noop_log):
+    """Download (or reuse) recovery + full installer. Returns (dmg, cnk, product, pkg, pkg_cnk)."""
+    cancel = cancel or threading.Event()
+    target = inst.recovery_target()
+    if not target:
+        raise RuntimeError("Phiên bản này không có ảnh Recovery cho Mac Intel (bản beta hoặc chỉ dành cho chip M).")
+    dmg, cnk, product = download_recovery(target, progress, log, cancel, stage)
+    pkg = download_installer(inst, data_dir() / "installers", progress, log, cancel,
+                             stage=lambda k: stage("pkg" + k))
+    pkg_cnk = pkg.with_suffix(".chunklist")
+    return dmg, cnk, product, pkg, (pkg_cnk if pkg_cnk.exists() else None)
+
+
+def write_offline_usb(disk: Disk, dmg: Path, chunklist: Path, product: str, target_name: str,
+                      pkg: Path, pkg_chunklist: Optional[Path],
+                      progress: Progress = _noop_progress, log: Log = _noop_log,
+                      cancel: Optional[threading.Event] = None, allow_non_usb: bool = False,
+                      stage: Log = _noop_log) -> tuple[str, str]:
+    cancel = cancel or threading.Event()
+    need = offline_min_size(pkg.stat().st_size)
+    if disk.size < need:
+        raise RuntimeError(f"USB quá nhỏ: cần ít nhất {human_size(need)} (khuyên dùng USB 32 GB trở lên).")
+    stage("format")
+    boot, data = (Path(x) for x in format_usb_offline(disk, log, allow_non_usb))
+    log(f"Đã định dạng: {boot} ({USB_LABEL}) và {data} ({INSTALL_LABEL})")
+    rec = _install_boot_files(boot, dmg, chunklist, target_name, progress, cancel, log, stage)
+    stage("pkgcopy")
+    log(f"Chép bộ cài đầy đủ ({human_size(pkg.stat().st_size)}) vào {INSTALL_LABEL}… (có thể mất 10–30 phút)")
+    _copy_file(pkg, data / "InstallAssistant.pkg", progress, cancel, "Ghi InstallAssistant.pkg")
+    if pkg_chunklist:
+        shutil.copy2(pkg_chunklist, data / "InstallAssistant.chunklist")
+    with open(data / "cai-macos.sh", "w", encoding="ascii", errors="replace", newline="\n") as fh:
+        fh.write(OFFLINE_SCRIPT.format(name=target_name))
+    readme = OFFLINE_README.format(name=target_name, product=product)
+    (boot / "HUONG-DAN.txt").write_text(readme, encoding="utf-8")
+    (data / "HUONG-DAN.txt").write_text(readme, encoding="utf-8")
+    stage("check")
+    log("Kiểm tra lại dữ liệu trên USB…")
+    verify_image(rec / dmg.name, rec / chunklist.name, progress, cancel, "Kiểm tra Recovery trên USB")
+    if pkg_chunklist:
+        verify_image(data / "InstallAssistant.pkg", data / "InstallAssistant.chunklist", progress, cancel,
+                     "Kiểm tra bộ cài trên USB", require_signature=False)
+    elif (data / "InstallAssistant.pkg").stat().st_size != pkg.stat().st_size:
+        raise RuntimeError("Bộ cài chép sang USB không đủ dung lượng.")
+    log("USB cài đặt offline đã sẵn sàng.")
+    return str(boot), str(data)
+
+
+def _make_test_pkg(folder: Path, size: int = 64 * 1024 ** 2) -> tuple[Path, Path]:
+    """Fake pkg + unsigned (digest-only) chunklist for CI tests."""
+    folder.mkdir(parents=True, exist_ok=True)
+    pkg, cnk = folder / "Test.pkg", folder / "Test.chunklist"
+    chunk = 8 * 1024 ** 2
+    entries = []
+    with open(pkg, "wb") as f:
+        for _ in range(size // chunk):
+            data = os.urandom(chunk)
+            f.write(data)
+            entries.append(_CNK_CHUNK.pack(chunk, hashlib.sha256(data).digest()))
+    header = _CNK_HEADER.pack(b"CNKL", 0x24, 1, 1, 2, len(entries), 0x24, 0x24 + 0x24 * len(entries))
+    body = header + b"".join(entries)
+    cnk.write_bytes(body + hashlib.sha256(body).digest())
+    return pkg, cnk
+
+
+# --------------------------------------------------------------------------
 # Self test (used by CI)
 # --------------------------------------------------------------------------
 
@@ -722,6 +937,15 @@ def selftest(full: bool = False, vhd_disk: Optional[int] = None) -> int:
     insts = check("Apple catalog installers", lambda: [i.label() for i in list_installers(True)][:12])
     if insts:
         print(f"       {len(insts)} shown")
+    def pkg_chunklist_check():
+        inst = next(i for i in list_installers(False) if i.intel_ok and i.integrity_url)
+        tmp = data_dir() / "probe.chunklist"
+        _download(inst.integrity_url, tmp, {"User-Agent": "macUSBWin"}, _noop_progress, threading.Event(), "x")
+        smethod = tmp.read_bytes()[10]
+        n = len(read_chunklist(tmp, require_signature=False))
+        return f"{inst.label()}: {n} chunks, signature_method={smethod}, recovery={inst.recovery_target().name}"
+    check("Installer integrity chunklist", pkg_chunklist_check)
+    check("Offline script renders", lambda: len(OFFLINE_SCRIPT.format(name="macOS Ventura 13")))
     target = next(t for t in RECOVERY_TARGETS if t.name.startswith("macOS Ventura"))
     if full:
         res = check("Download+verify Ventura recovery",
@@ -740,5 +964,17 @@ def selftest(full: bool = False, vhd_disk: Optional[int] = None) -> int:
                             "EFI/OC/Drivers/OpenRuntime.efi", f"com.apple.recovery.boot/{res[0].name}",
                             f"com.apple.recovery.boot/{res[1].name}", "HUONG-DAN.txt"):
                     check(f"USB has {rel}", lambda rel=rel: (Path(root) / rel).exists() or (_ for _ in ()).throw(RuntimeError("missing")))
+            pkg, pcnk = _make_test_pkg(data_dir() / "testpkg")
+            roots = check("Write OFFLINE installer USB to test disk",
+                          lambda: write_offline_usb(disk, res[0], res[1], res[2], target.name, pkg, pcnk,
+                                                    log=print, allow_non_usb=True))
+            if roots:
+                b, d = (Path(x) for x in roots)
+                for base, rel in ((b, "EFI/BOOT/BOOTx64.efi"), (b, "EFI/OC/config.plist"),
+                                  (b, f"com.apple.recovery.boot/{res[0].name}"), (b, "HUONG-DAN.txt"),
+                                  (d, "InstallAssistant.pkg"), (d, "InstallAssistant.chunklist"),
+                                  (d, "cai-macos.sh"), (d, "HUONG-DAN.txt")):
+                    check(f"OFFLINE USB has {base}{rel}", lambda base=base, rel=rel: (base / rel).exists() or (_ for _ in ()).throw(RuntimeError("missing")))
+                check("cai-macos.sh uses LF only", lambda: b"\r" not in (d / "cai-macos.sh").read_bytes() or (_ for _ in ()).throw(RuntimeError("CRLF")))
     print("SELFTEST", "PASSED" if ok else "FAILED")
     return 0 if ok else 1

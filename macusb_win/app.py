@@ -21,6 +21,11 @@ USB_STAGES = [("download", "Tải ảnh Recovery từ Apple"), ("verify", "Kiể
               ("format", "Xoá và định dạng USB (FAT32)"), ("efi", "Chép bộ khởi động OpenCore"),
               ("copy", "Chép ảnh Recovery vào USB"), ("check", "Kiểm tra dữ liệu trên USB")]
 LOCAL_STAGES = [("verify", "Kiểm tra file nguồn")] + USB_STAGES[2:]
+OFFLINE_STAGES = [("download", "Tải ảnh Recovery từ Apple"), ("verify", "Kiểm tra chữ ký Recovery"),
+                  ("pkgdownload", "Tải bộ cài đầy đủ từ Apple"), ("pkgverify", "Kiểm tra bộ cài (chunklist)"),
+                  ("format", "Xoá USB, tạo 2 phân vùng (FAT32 + exFAT)"), ("efi", "Chép bộ khởi động OpenCore"),
+                  ("copy", "Chép ảnh Recovery"), ("pkgcopy", "Chép bộ cài đầy đủ + script cài"),
+                  ("check", "Kiểm tra dữ liệu trên USB")]
 PKG_STAGES = [("download", "Tải bộ cài đầy đủ từ Apple"), ("verify", "Kiểm tra toàn vẹn (chunklist)")]
 GREY, OK, ERR = "#666", "#1a7f37", "#cf222e"
 
@@ -138,13 +143,16 @@ class App(tk.Tk):
         self.tree.bind("<<TreeviewSelect>>", lambda e: self._on_installer())
         act = ttk.Frame(b)
         act.pack(fill="x")
-        self.btn_pkg = ttk.Button(act, text="Tải bộ cài đầy đủ (.pkg)…", command=self.start_pkg, state="disabled")
-        self.btn_pkg.pack(side="left")
+        self.btn_offline = ttk.Button(act, text="Tạo USB cài đặt offline (thử nghiệm)…",
+                                      command=self.go_offline, state="disabled", style="Big.TButton")
+        self.btn_offline.pack(side="left")
+        self.btn_pkg = ttk.Button(act, text="Chỉ tải bộ cài (.pkg)…", command=self.start_pkg, state="disabled")
+        self.btn_pkg.pack(side="left", padx=8)
         self.inst_note = ttk.Label(b, style="Sub.TLabel", wraplength=740, justify="left", text=(
-            "Bộ cài đầy đủ (InstallAssistant.pkg, 12–17 GB) dùng trên máy Mac: mở file .pkg để có app "
-            "\"Install macOS…\", rồi dùng macUSB trên Mac để tạo USB cài offline. Trên Windows, nút "
-            "\"Tiếp tục\" sẽ tạo USB Recovery cùng phiên bản (cài qua Internet). Danh sách chỉ gồm "
-            "Big Sur 11 trở lên."))
+            "• USB cài đặt offline: chứa bộ cài đầy đủ 12–17 GB + macOS Recovery, cài lại máy KHÔNG cần "
+            "Internet (cần USB 32 GB). Chế độ thử nghiệm.\n"
+            "• \"Tiếp tục →\": tạo USB Recovery cùng phiên bản (nhỏ, cài qua Internet).\n"
+            "• Bản Public Beta và macOS 27 chỉ tải được file .pkg. Danh sách gồm Big Sur 11 trở lên."))
         self.inst_note.pack(anchor="w", pady=(6, 0))
 
         # C. Local
@@ -394,7 +402,18 @@ class App(tk.Tk):
         return self.installers[int(sel[0])] if sel else None
 
     def _on_installer(self) -> None:
-        self.btn_pkg.configure(state="normal" if self._installer() else "disabled")
+        inst = self._installer()
+        self.btn_pkg.configure(state="normal" if inst else "disabled")
+        self.btn_offline.configure(state="normal" if inst and inst.recovery_target() else "disabled")
+
+    def go_offline(self) -> None:
+        inst = self._installer()
+        if not inst or not inst.recovery_target():
+            return
+        self._src = ("offline", inst, f"Bộ cài đầy đủ {inst.label()} ({core.human_size(inst.size)}) "
+                                      f"+ {inst.recovery_target().name} — USB cài đặt OFFLINE (thử nghiệm)")
+        self.refresh_disks()
+        self.show("target")
 
     def browse_file(self) -> None:
         f = filedialog.askopenfilename(title="Chọn ảnh Recovery", filetypes=[
@@ -457,11 +476,13 @@ class App(tk.Tk):
         if not disk:
             messagebox.showwarning(core.APP_NAME, "Chưa chọn ổ USB. Cắm USB rồi bấm Làm mới.")
             return
-        if disk.size < 4 * 1024 ** 3:
-            messagebox.showwarning(core.APP_NAME, "USB quá nhỏ. Hãy dùng USB từ 4 GB trở lên.")
+        kind, val, desc = self._src
+        need = core.offline_min_size(val.size) if kind == "offline" else 4 * 1024 ** 3
+        if disk.size < need:
+            messagebox.showwarning(core.APP_NAME, f"USB quá nhỏ. Cần ít nhất {core.human_size(need)}"
+                                   + (" (khuyên dùng USB 32 GB)." if kind == "offline" else "."))
             return
         self._disk = disk
-        kind, val, desc = self._src
         part = "16 GB" if disk.size > 32000 * 1024 ** 2 else "toàn bộ ổ"
         r = self.review
         r.configure(state="normal")
@@ -473,13 +494,23 @@ class App(tk.Tk):
         r.insert("end", "\nỔ đích\n", "b")
         r.insert("end", f"  {disk.label()}\n")
         r.insert("end", "\nCác việc sẽ làm\n", "b")
-        steps = USB_STAGES if kind == "apple" else LOCAL_STAGES
+        steps = {"apple": USB_STAGES, "local": LOCAL_STAGES, "offline": OFFLINE_STAGES}[kind]
         for i, (_, t) in enumerate(steps, 1):
             r.insert("end", f"  {i}. {t}\n")
-        r.insert("end", f"\n  Phân vùng: MBR, 1 phân vùng FAT32 ({part}), nhãn {core.USB_LABEL}\n")
+        if kind == "offline":
+            r.insert("end", f"\n  Phân vùng: MBR — {core.USB_LABEL} (FAT32, {core.BOOT_PART_MB} MB, khởi động) + "
+                            f"{core.INSTALL_LABEL} (exFAT, phần còn lại, chứa bộ cài)\n")
+            r.insert("end", "  Cần tải khoảng " + core.human_size(val.size + 900 * 1024 ** 2)
+                     + " (bỏ qua nếu đã tải trước đó). Ổ C: cần đủ chỗ trống.\n")
+        else:
+            r.insert("end", f"\n  Phân vùng: MBR, 1 phân vùng FAT32 ({part}), nhãn {core.USB_LABEL}\n")
         r.insert("end", "  Bộ khởi động: OpenCore tối giản (không kext, không sửa NVRAM/SMBIOS)\n")
         r.insert("end", "\nCẢNH BÁO: toàn bộ dữ liệu trên ổ USB này sẽ bị xoá vĩnh viễn.\n", "warn")
-        r.insert("end", "USB này dành cho Mac Intel; cài macOS qua Internet trong Recovery.")
+        if kind == "offline":
+            r.insert("end", "Chế độ THỬ NGHIỆM: cài offline bằng script trong Terminal của Recovery. Nếu không chạy, "
+                            "USB vẫn dùng được như USB Recovery (cài qua Internet).")
+        else:
+            r.insert("end", "USB này dành cho Mac Intel; cài macOS qua Internet trong Recovery.")
         r.configure(state="disabled")
         self.confirm.set(False)
         self.show("review")
@@ -490,6 +521,9 @@ class App(tk.Tk):
             return
         kind, val, desc = self._src
         disk = self._disk
+        if kind == "offline":
+            self._start_offline(val, disk)
+            return
         name = val.name if kind == "apple" else f"Recovery từ file {Path(val).name}"
 
         def job(log, prog, stage):
@@ -502,6 +536,18 @@ class App(tk.Tk):
 
         self._run("Đang tạo USB Recovery…", USB_STAGES if kind == "apple" else LOCAL_STAGES, job, self._finish_usb)
 
+    def _start_offline(self, inst, disk) -> None:
+        name = f"{inst.title} {inst.version} ({inst.build})"
+
+        def job(log, prog, stage):
+            dmg, cnk, product, pkg, pcnk = core.prepare_offline_sources(inst, prog, log, self.cancel, stage)
+            boot, data = core.write_offline_usb(disk, dmg, cnk, product, name, pkg, pcnk, prog, log,
+                                                self.cancel, stage=stage)
+            return {"root": boot, "data": data, "name": name, "product": product, "disk": disk.label(),
+                    "offline": True}
+
+        self._run("Đang tạo USB cài đặt offline…", OFFLINE_STAGES, job, self._finish_usb)
+
     def _finish_usb(self, ok: bool, res) -> None:
         t = self.fin_text
         t.configure(state="normal")
@@ -510,9 +556,23 @@ class App(tk.Tk):
         self.btn_open.pack_forget()
         if ok:
             self.result_root = res["root"]
-            self.fin_title.configure(text="✔  USB Recovery đã sẵn sàng", foreground=OK)
-            self.fin_sub.configure(text=f"{res['name']} — ổ {res['root']}")
-            t.insert("end", "Bước tiếp theo trên Mac Intel:\n"
+            off = res.get("offline")
+            self.fin_title.configure(text="✔  USB cài đặt offline đã sẵn sàng" if off else "✔  USB Recovery đã sẵn sàng",
+                                     foreground=OK)
+            self.fin_sub.configure(text=f"{res['name']} — ổ {res['root']}" + (f" + {res['data']}" if off else ""))
+            if off:
+                t.insert("end", "Cài lại macOS không cần Internet:\n"
+                                "1. Bấm \"Tháo USB an toàn\", cắm USB vào Mac, bật máy và giữ phím Option (⌥).\n"
+                                "2. Chọn \"EFI Boot\" → mục macOS Recovery.\n"
+                                "3. (Muốn xoá sạch máy) Disk Utility → Erase ổ trong: APFS, tên \"Macintosh HD\".\n"
+                                "4. Utilities → Terminal, gõ:   sh /Volumes/MACINSTALL/cai-macos.sh\n"
+                                "5. Nhập tên ổ (Enter = Macintosh HD) và chờ máy tự cài, tự khởi động lại.\n\n"
+                                "Chế độ thử nghiệm: nếu script báo lỗi, chụp màn hình gửi lại; vẫn có thể chọn "
+                                "\"Reinstall macOS\" để cài qua Internet.\n\n"
+                                f"Ổ đích: {res['disk']}\nGói Recovery: {res['product']}\n"
+                                "Hướng dẫn chi tiết: HUONG-DAN.txt trên USB.")
+            else:
+                t.insert("end", "Bước tiếp theo trên Mac Intel:\n"
                             "1. Bấm \"Tháo USB an toàn\" bên dưới rồi rút USB.\n"
                             "2. Cắm USB vào Mac, bật máy và giữ phím Option (⌥).\n"
                             "3. Chọn \"EFI Boot\", rồi chọn mục macOS Recovery / macOS Base System.\n"
@@ -605,6 +665,10 @@ def ui_smoke_test() -> int:
         app._set_stage(k)
     app._finish_stages(True)
     app._finish_usb(True, {"root": "Z:\\", "name": "test", "product": "p", "disk": "d"})
+    app._finish_usb(True, {"root": "Z:\\", "data": "Y:\\", "name": "t", "product": "p", "disk": "d", "offline": True})
+    app._setup_stages(OFFLINE_STAGES)
+    for k, _ in OFFLINE_STAGES:
+        app._set_stage(k)
     app._finish_usb(False, "lỗi thử")
     app.update()
     app.destroy()

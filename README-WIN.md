@@ -11,7 +11,9 @@ Tải **macUSB-Win.exe** bên dưới, chạy (Windows sẽ hỏi quyền Admini
 4. **Theo dõi từng giai đoạn**: tải → kiểm tra chữ ký Apple → định dạng → chép OpenCore → chép Recovery → kiểm tra USB.
 5. **Kết quả**: nút **Tháo USB an toàn** ngay trên màn hình cuối.
 
-Giới hạn của Windows: file `.pkg` bộ cài đầy đủ không biến thành USB cài offline được (cần `createinstallmedia` trên Mac). USB tạo ra là USB Recovery — cài macOS qua Internet.
+**Mới (1.2): USB cài đặt offline — thử nghiệm.** Trong *Trình tải bộ cài macOS*, chọn một bản (Big Sur 11 → Tahoe 26) → **Tạo USB cài đặt offline**. USB (≥ 32 GB) gồm 2 phân vùng: `MACRECOVERY` (OpenCore + macOS Recovery) và `MACINSTALL` (bộ cài đầy đủ + script). Trên Mac: Option → EFI Boot → Recovery → Utilities → Terminal → `sh /Volumes/MACINSTALL/cai-macos.sh`. Cài lại không cần Internet.
+
+Giới hạn của Windows: không tạo được USB giống hệt `createinstallmedia` của Mac (cần định dạng HFS+). Chế độ offline ở trên là cách thay thế: Recovery khởi động bằng OpenCore rồi cài từ bộ cài đầy đủ trên phân vùng exFAT.
 
 ## Khởi động trên Mac
 1. Cắm USB, bật máy và giữ phím **Option (⌥)**.
