@@ -5,7 +5,7 @@ name: Build macUSB for Intel + macOS Ventura
 on:
   workflow_dispatch:
   push:
-    branches: [ventura-intel, main]
+    branches: [ventura-intel, "ventura-intel-*", main]
 
 permissions:
   contents: write
@@ -79,7 +79,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="ventura-intel-build-${{ github.run_number }}"
+          TAG="${{ github.ref_name }}-build-${{ github.run_number }}"
           gh release create "$TAG" macUSB-ventura-intel.zip install-macusb.sh ventura/HUONG-DAN.md \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
