@@ -31,7 +31,8 @@ fi
 [ -d "$APP" ] || { echo "Không tìm thấy macUSB.app trong $SRC" >&2; exit 1; }
 
 echo "==> Kiểm tra kiến trúc và phiên bản macOS tối thiểu"
-lipo -info "$APP/Contents/MacOS/macUSB"
+# Chỉ dùng công cụ có sẵn trong macOS (không cần Command Line Tools / Xcode).
+file "$APP/Contents/MacOS/macUSB"
 /usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$APP/Contents/Info.plist" || true
 
 echo "==> Gỡ cờ quarantine (file tải từ Internet)"

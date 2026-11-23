@@ -689,7 +689,7 @@ struct SystemAnalysisView: View {
     private var analysisContentWithMenuStateHandlers: AnyView {
         AnyView(
             analysisContentWithResetHandlers
-                .onChange(of: menuState.externalDrivesEnabled) { _, _ in logic.usbExternalDrivePreferenceChanged() }
+                .onChange(of: menuState.externalDrivesEnabled) { _ in logic.usbExternalDrivePreferenceChanged() }
                 .onChange(of: logic.showUnsupportedMessage) { _ in updateMenuState() }
                 .onChange(of: logic.recognizedVersion) { _ in updateMenuState() }
                 .onChange(of: logic.isAnalyzing) { _ in updateMenuState() }

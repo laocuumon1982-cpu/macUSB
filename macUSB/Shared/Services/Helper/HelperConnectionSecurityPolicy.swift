@@ -75,7 +75,7 @@ enum HelperConnectionSecurityPolicy {
 
         AppLogging.info(
             "Wymaganie podpisu helpera: \(trustedHelperRequirement)",
-            category: "HelperService"
+            stage: .helper
         )
         connection.setCodeSigningRequirement(trustedHelperRequirement)
 
